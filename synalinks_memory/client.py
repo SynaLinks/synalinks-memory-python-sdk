@@ -1,4 +1,6 @@
-"""Synchronous client for the Synalinks Memory API."""
+# License Apache 2.0: (c) 2026 Yoan Sallami (Synalinks Team)
+
+"""Synchronous HTTP client for the Synalinks Memory API."""
 
 from __future__ import annotations
 
@@ -8,6 +10,17 @@ import threading
 from typing import Any
 
 import httpx
+
+try:
+    import orjson as _json
+
+    def _loads(data: bytes | str) -> Any:
+        return _json.loads(data)
+except ModuleNotFoundError:
+    import json as _json  # type: ignore[no-redef]
+
+    def _loads(data: bytes | str) -> Any:  # type: ignore[misc]
+        return _json.loads(data)
 
 from .exceptions import (
     AuthenticationError,
@@ -105,7 +118,7 @@ class SynalinksMemory:
         """List all available predicates (tables, concepts, rules)."""
         resp = self._client.get("/v1/predicates")
         self._handle_response(resp)
-        return PredicateList.model_validate(resp.json())
+        return PredicateList.model_validate(_loads(resp.content))
 
     def execute(
         self,
@@ -115,7 +128,7 @@ class SynalinksMemory:
         offset: int = 0,
         format: str | None = None,
         output: str | None = None,
-    ) -> ExecuteResult | bytes:
+    ) -> ExecuteResult | bytes | int:
         """Execute a predicate and return rows.
 
         Args:
@@ -125,13 +138,33 @@ class SynalinksMemory:
             format: If set to ``json``, ``csv``, or ``parquet``, returns raw
                 file bytes instead of an ``ExecuteResult``.
             output: Write the file bytes to this path (only used with *format*).
+                When provided, the response is streamed directly to disk to
+                avoid buffering large exports in memory, and the return value
+                is the number of bytes written.
 
         Returns:
-            ``ExecuteResult`` when *format* is None, otherwise raw ``bytes``.
+            ``ExecuteResult`` when *format* is None; the number of bytes
+            written (``int``) when both *format* and *output* are set;
+            raw ``bytes`` when only *format* is set.
         """
         body: dict[str, Any] = {"limit": limit, "offset": offset}
         if format is not None:
             body["format"] = format
+
+        if format is not None and output:
+            # Stream directly to disk — avoids buffering the entire file
+            with self._client.stream(
+                "POST",
+                f"/v1/predicates/{predicate}/execute",
+                json=body,
+            ) as stream:
+                self._handle_response(stream)
+                written = 0
+                with open(output, "wb") as f:
+                    for chunk in stream.iter_bytes(chunk_size=65_536):
+                        f.write(chunk)
+                        written += len(chunk)
+                return written
 
         resp = self._client.post(
             f"/v1/predicates/{predicate}/execute",
@@ -140,13 +173,9 @@ class SynalinksMemory:
         self._handle_response(resp)
 
         if format is not None:
-            data = resp.content
-            if output:
-                with open(output, "wb") as f:
-                    f.write(data)
-            return data
+            return resp.content
 
-        return ExecuteResult.model_validate(resp.json())
+        return ExecuteResult.model_validate(_loads(resp.content))
 
     def search(
         self, predicate: str, keywords: str, *, limit: int = 100, offset: int = 0
@@ -157,7 +186,7 @@ class SynalinksMemory:
             json={"keywords": keywords, "limit": limit, "offset": offset},
         )
         self._handle_response(resp)
-        return SearchResult.model_validate(resp.json())
+        return SearchResult.model_validate(_loads(resp.content))
 
     def upload(
         self,
@@ -193,7 +222,7 @@ class SynalinksMemory:
             resp = self._client.post("/v1/tables/upload", files=files, data=data)
 
         self._handle_response(resp)
-        return UploadResult.model_validate(resp.json())
+        return UploadResult.model_validate(_loads(resp.content))
 
     def ask(self, question: str) -> str:
         """Ask the Synalinks agent a question and get a single-turn answer.
@@ -206,7 +235,7 @@ class SynalinksMemory:
         """
         resp = self._client.post("/v1/ask", json={"question": question})
         self._handle_response(resp)
-        return resp.json()["answer"]
+        return _loads(resp.content)["answer"]
 
     # -- Internals -------------------------------------------------------------
 
@@ -220,7 +249,7 @@ class SynalinksMemory:
         code = "unknown"
         message = resp.text
         try:
-            body = resp.json()
+            body = _loads(resp.content)
             error = body.get("error", {})
             code = error.get("code", code)
             message = error.get("message", message)

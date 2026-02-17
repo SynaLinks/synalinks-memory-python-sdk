@@ -1,4 +1,6 @@
-"""Exception hierarchy for the Synalinks Memory SDK."""
+# License Apache 2.0: (c) 2026 Yoan Sallami (Synalinks Team)
+
+"""Typed exception hierarchy for Synalinks API errors."""
 
 from typing import Optional
 

@@ -1,8 +1,10 @@
-"""Pydantic response models for the Synalinks Memory API."""
+# License Apache 2.0: (c) 2026 Yoan Sallami (Synalinks Team)
+
+"""Pydantic models for API request and response payloads."""
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PredicateInfo(BaseModel):
@@ -28,11 +30,18 @@ class Column(BaseModel):
 
 
 class ExecuteResult(BaseModel):
-    """Response from POST /v1/predicates/{name}/execute."""
+    """Response from POST /v1/predicates/{name}/execute.
+
+    ``rows`` uses arbitrary_types_allowed so Pydantic passes the
+    already-deserialized list[dict] through without re-validating
+    every cell — critical for large result sets.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     predicate: str
     columns: list[Column]
-    rows: list[dict[str, Any]]
+    rows: Any  # list[dict[str, Any]] — skip per-row validation
     row_count: int
     total_rows: int
     offset: int
@@ -40,12 +49,17 @@ class ExecuteResult(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Response from POST /v1/predicates/{name}/search."""
+    """Response from POST /v1/predicates/{name}/search.
+
+    See ``ExecuteResult`` for the ``rows`` optimisation rationale.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     predicate: str
     keywords: str
     columns: list[Column]
-    rows: list[dict[str, Any]]
+    rows: Any  # list[dict[str, Any]] — skip per-row validation
     row_count: int
     total_rows: int
     offset: int
