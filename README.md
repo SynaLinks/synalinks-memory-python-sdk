@@ -31,7 +31,7 @@ from synalinks_memory import SynalinksMemory
 
 with SynalinksMemory() as client:
     # List all available tables, concepts, and rules
-    predicates = client.list_predicates()
+    predicates = client.list()
     for table in predicates.tables:
         print(f"{table.name}: {table.description}")
 
@@ -99,7 +99,7 @@ with SynalinksMemory() as client:
 
 | Method | Description |
 |--------|-------------|
-| `list_predicates()` | List all tables, concepts, and rules |
+| `list()` | List all tables, concepts, and rules |
 | `execute(predicate, *, limit=100, offset=0, format=None, output=None)` | Fetch rows (or export as json/csv/parquet file when *format* is set) |
 | `search(predicate, keywords, *, limit=100, offset=0)` | Search rows by keywords (fuzzy matching) |
 | `upload(file_path, *, name=None, description=None, overwrite=False)` | Upload a CSV or Parquet file as a new table |

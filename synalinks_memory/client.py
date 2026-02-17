@@ -101,7 +101,7 @@ class SynalinksMemory:
 
     # -- Public API ------------------------------------------------------------
 
-    def list_predicates(self) -> PredicateList:
+    def list(self) -> PredicateList:
         """List all available predicates (tables, concepts, rules)."""
         resp = self._client.get("/v1/predicates")
         self._handle_response(resp)
