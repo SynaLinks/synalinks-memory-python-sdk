@@ -72,3 +72,17 @@ class UploadResult(BaseModel):
     predicate: str
     columns: list[Column]
     row_count: int
+
+
+class AskStepEvent(BaseModel):
+    """A step event emitted during agent processing."""
+
+    step: int
+    name: str
+    label: str
+
+
+class AskAnswerEvent(BaseModel):
+    """The final answer event from the agent."""
+
+    answer: str

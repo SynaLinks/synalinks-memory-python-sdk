@@ -12,12 +12,14 @@ from .exceptions import (
     SynalinksError,
     ValidationError,
 )
-from .models import Column, ExecuteResult, PredicateInfo, PredicateList, SearchResult, UploadResult
+from .models import AskAnswerEvent, AskStepEvent, Column, ExecuteResult, PredicateInfo, PredicateList, SearchResult, UploadResult
 
 
 __all__ = [
     "__version__",
     "version",
+    "AskAnswerEvent",
+    "AskStepEvent",
     "AuthenticationError",
     "Column",
     "ExecuteResult",

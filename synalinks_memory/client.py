@@ -30,7 +30,7 @@ from .exceptions import (
     SynalinksError,
     ValidationError,
 )
-from .models import ExecuteResult, PredicateList, SearchResult, UploadResult
+from .models import AskAnswerEvent, AskStepEvent, ExecuteResult, PredicateList, SearchResult, UploadResult
 
 _ERROR_MAP: dict[int, type[SynalinksError]] = {
     401: AuthenticationError,
@@ -227,15 +227,72 @@ class SynalinksMemory:
     def ask(self, question: str) -> str:
         """Ask the Synalinks agent a question and get a single-turn answer.
 
+        This is a convenience wrapper around :meth:`ask_stream` that discards
+        intermediate step events and returns only the final answer.
+
         Args:
             question: The question to ask.
 
         Returns:
             The agent's answer as a string.
         """
-        resp = self._client.post("/v1/ask", json={"question": question})
-        self._handle_response(resp)
-        return _loads(resp.content)["answer"]
+        answer = ""
+        for event in self.ask_stream(question):
+            if isinstance(event, AskAnswerEvent):
+                answer = event.answer
+        return answer
+
+    def ask_stream(self, question: str):
+        """Ask the Synalinks agent a question and yield events as they arrive.
+
+        The ``/v1/ask`` endpoint returns a Server-Sent Events stream. This
+        method yields :class:`AskStepEvent` for each intermediate tool call
+        and a final :class:`AskAnswerEvent` with the agent's answer.
+
+        Args:
+            question: The question to ask.
+
+        Yields:
+            ``AskStepEvent`` or ``AskAnswerEvent`` instances.
+        """
+        with self._client.stream(
+            "POST",
+            "/v1/ask",
+            json={"question": question},
+            headers={"Accept": "text/event-stream"},
+            timeout=httpx.Timeout(10.0, read=300.0),
+        ) as stream:
+            self._handle_response(stream)
+            event_type = ""
+            data_buf = ""
+            for line in stream.iter_lines():
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data_buf = line[len("data:"):].strip()
+                elif line == "":
+                    yield from self._process_sse_event(event_type, data_buf)
+                    event_type = ""
+                    data_buf = ""
+            # Handle final event if stream ends without trailing blank line
+            yield from self._process_sse_event(event_type, data_buf)
+
+    @staticmethod
+    def _process_sse_event(event_type: str, data_buf: str):
+        """Parse a single SSE event and yield the appropriate model."""
+        if not data_buf:
+            return
+        payload = _loads(data_buf)
+        if event_type == "step":
+            yield AskStepEvent(**payload)
+        elif event_type == "answer":
+            yield AskAnswerEvent(**payload)
+        elif event_type == "error":
+            raise SynalinksError(
+                500,
+                "agent_error",
+                payload.get("message", "Agent returned an error"),
+            )
 
     # -- Internals -------------------------------------------------------------
 
