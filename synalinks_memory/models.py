@@ -74,15 +74,31 @@ class UploadResult(BaseModel):
     row_count: int
 
 
-class AskStepEvent(BaseModel):
+class InsertResult(BaseModel):
+    """Response from POST /v1/predicates/{name}/rows."""
+
+    predicate: str
+    row: dict[str, Any]
+
+
+class UpdateResult(BaseModel):
+    """Response from PUT /v1/predicates/{name}/rows."""
+
+    predicate: str
+    updated_count: int
+    values: dict[str, Any]
+
+
+class ChatStepEvent(BaseModel):
     """A step event emitted during agent processing."""
 
     step: int
-    name: str
+    name: str = ""
     label: str
 
 
-class AskAnswerEvent(BaseModel):
+class ChatAnswerEvent(BaseModel):
     """The final answer event from the agent."""
 
     answer: str
+    messages: list[dict[str, Any]] = []

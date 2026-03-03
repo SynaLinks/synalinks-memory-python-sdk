@@ -18,6 +18,12 @@ uv add synalinks-memory
 
 ## Quick Start
 
+A **Synalinks API key** is required to authenticate with your knowledge base.
+
+When you create a knowledge base on [app.synalinks.com](https://app.synalinks.com), a **default API key** is generated automatically with read/write access and no predicate restrictions — you can use it right away.
+
+To create a key with granular access, go to **Profile icon** (in the header) > **API Keys** > **Create API Key**.
+
 Set your API key as an environment variable:
 
 ```bash
@@ -49,13 +55,27 @@ with SynalinksMemory() as client:
     upload = client.upload("data/sales.csv", name="Sales", description="Monthly sales data")
     print(f"Uploaded {upload.predicate} ({upload.row_count} rows)")
 
+    # Insert a row
+    client.insert("Users", {"name": "Alice", "email": "alice@example.com"})
+
+    # Update rows matching a filter
+    result = client.update("Users", filter={"name": "Alice"}, values={"email": "alice@new.com"})
+    print(f"Updated {result.updated_count} row(s)")
+
     # Export data as a file (CSV, Parquet, or JSON)
     client.execute("Users", format="csv", output="users.csv")
     client.execute("Users", format="parquet", output="users.parquet")
 
-    # Ask the agent a question
-    answer = client.ask("What were the top 5 products by revenue last month?")
+    # Chat with the agent (multi-turn)
+    answer = client.chat("What were the top 5 products by revenue last month?")
     print(answer)
+
+    # Follow-up question (uses conversation context automatically)
+    answer = client.chat("Show me just the top 3")
+    print(answer)
+
+    # Reset conversation history
+    client.clear()
 ```
 
 You can also pass the key directly:
@@ -103,7 +123,10 @@ with SynalinksMemory() as client:
 | `execute(predicate, *, limit=100, offset=0, format=None, output=None)` | Fetch rows (or export as json/csv/parquet file when *format* is set) |
 | `search(predicate, keywords, *, limit=100, offset=0)` | Search rows by keywords (fuzzy matching) |
 | `upload(file_path, *, name=None, description=None, overwrite=False)` | Upload a CSV or Parquet file as a new table |
-| `ask(question)` | Ask the agent a question, returns the answer string |
+| `insert(predicate, row)` | Insert a single row into a table |
+| `update(predicate, filter, values)` | Update rows matching a filter with new values |
+| `chat(question)` | Chat with the agent (multi-turn), returns the answer string |
+| `clear()` | Reset conversation history for a fresh chat |
 | `close()` | Close the HTTP client (not needed with `with` statement) |
 
 ## License

@@ -92,7 +92,7 @@ class TestListPredicates:
             headers={"X-API-Key": "test-key"},
         )
 
-        result = client.list_predicates()
+        result = client.list()
 
         assert len(result.tables) == 2
         assert result.tables[0].name == "Users"
@@ -164,14 +164,14 @@ class TestErrorMapping:
     def test_401_raises_authentication_error(self):
         client = self._make_client(401, "unauthorized", "Invalid API key")
         with pytest.raises(AuthenticationError) as exc_info:
-            client.list_predicates()
+            client.list()
         assert exc_info.value.status_code == 401
         assert exc_info.value.code == "unauthorized"
 
     def test_403_raises_forbidden_error(self):
         client = self._make_client(403, "forbidden", "Access denied")
         with pytest.raises(ForbiddenError) as exc_info:
-            client.list_predicates()
+            client.list()
         assert exc_info.value.status_code == 403
 
     def test_404_raises_not_found_error(self):
@@ -186,7 +186,7 @@ class TestErrorMapping:
             headers={"Retry-After": "1"},
         )
         with pytest.raises(RateLimitError) as exc_info:
-            client.list_predicates()
+            client.list()
         assert exc_info.value.retry_after == 1.0
 
     def test_400_raises_validation_error(self):
@@ -214,5 +214,5 @@ class TestContextManager:
                 base_url="https://api.test",
                 headers={"X-API-Key": "test-key"},
             )
-            result = client.list_predicates()
+            result = client.list()
             assert len(result.tables) == 2

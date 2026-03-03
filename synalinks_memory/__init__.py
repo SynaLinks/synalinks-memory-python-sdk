@@ -12,18 +12,19 @@ from .exceptions import (
     SynalinksError,
     ValidationError,
 )
-from .models import AskAnswerEvent, AskStepEvent, Column, ExecuteResult, PredicateInfo, PredicateList, SearchResult, UploadResult
+from .models import ChatAnswerEvent, ChatStepEvent, Column, ExecuteResult, InsertResult, PredicateInfo, PredicateList, SearchResult, UpdateResult, UploadResult
 
 
 __all__ = [
     "__version__",
     "version",
-    "AskAnswerEvent",
-    "AskStepEvent",
+    "ChatAnswerEvent",
+    "ChatStepEvent",
     "AuthenticationError",
     "Column",
     "ExecuteResult",
     "ForbiddenError",
+    "InsertResult",
     "NotFoundError",
     "PredicateInfo",
     "PredicateList",
@@ -31,6 +32,7 @@ __all__ = [
     "SearchResult",
     "SynalinksError",
     "SynalinksMemory",
+    "UpdateResult",
     "UploadResult",
     "ValidationError",
 ]

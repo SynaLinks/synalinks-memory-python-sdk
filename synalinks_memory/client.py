@@ -30,7 +30,7 @@ from .exceptions import (
     SynalinksError,
     ValidationError,
 )
-from .models import AskAnswerEvent, AskStepEvent, ExecuteResult, PredicateList, SearchResult, UploadResult
+from .models import ChatAnswerEvent, ChatStepEvent, ExecuteResult, InsertResult, PredicateList, SearchResult, UpdateResult, UploadResult
 
 _ERROR_MAP: dict[int, type[SynalinksError]] = {
     401: AuthenticationError,
@@ -80,6 +80,8 @@ class SynalinksMemory:
             headers={"X-API-Key": resolved_key},
             timeout=timeout,
         )
+        # Conversation history for multi-turn chat
+        self._messages: list[dict[str, Any]] = []
 
         # Fire a non-blocking request to wake up the backend (handles cold start)
         self._warm_up()
@@ -224,11 +226,49 @@ class SynalinksMemory:
         self._handle_response(resp)
         return UploadResult.model_validate(_loads(resp.content))
 
-    def ask(self, question: str) -> str:
-        """Ask the Synalinks agent a question and get a single-turn answer.
+    def insert(self, predicate: str, row: dict[str, Any]) -> InsertResult:
+        """Insert a single row into a table.
 
-        This is a convenience wrapper around :meth:`ask_stream` that discards
-        intermediate step events and returns only the final answer.
+        Args:
+            predicate: The table predicate name.
+            row: Column name → value mapping for the new row.
+
+        Returns:
+            InsertResult with the predicate name and inserted row.
+        """
+        resp = self._client.post(
+            f"/v1/predicates/{predicate}/rows",
+            json={"row": row},
+        )
+        self._handle_response(resp)
+        return InsertResult.model_validate(_loads(resp.content))
+
+    def update(
+        self, predicate: str, filter: dict[str, Any], values: dict[str, Any]
+    ) -> UpdateResult:
+        """Update rows in a table that match the given filter.
+
+        Args:
+            predicate: The table predicate name.
+            filter: Column→value conditions for the WHERE clause (ANDed).
+            values: Column→new value pairs to SET on matching rows.
+
+        Returns:
+            UpdateResult with predicate name, updated count, and values.
+        """
+        resp = self._client.put(
+            f"/v1/predicates/{predicate}/rows",
+            json={"filter": filter, "values": values},
+        )
+        self._handle_response(resp)
+        return UpdateResult.model_validate(_loads(resp.content))
+
+    def chat(self, question: str) -> str:
+        """Send a message to the Synalinks agent and get an answer.
+
+        Conversation history is maintained automatically. Each call appends
+        the new exchange to the internal history so follow-up questions have
+        full context. Use :meth:`clear` to reset the conversation.
 
         Args:
             question: The question to ask.
@@ -237,28 +277,33 @@ class SynalinksMemory:
             The agent's answer as a string.
         """
         answer = ""
-        for event in self.ask_stream(question):
-            if isinstance(event, AskAnswerEvent):
+        for event in self.chat_stream(question):
+            if isinstance(event, ChatAnswerEvent):
                 answer = event.answer
         return answer
 
-    def ask_stream(self, question: str):
-        """Ask the Synalinks agent a question and yield events as they arrive.
+    def chat_stream(self, question: str):
+        """Send a message and yield events as they arrive (streaming).
 
-        The ``/v1/ask`` endpoint returns a Server-Sent Events stream. This
-        method yields :class:`AskStepEvent` for each intermediate tool call
-        and a final :class:`AskAnswerEvent` with the agent's answer.
+        The ``/v1/chat`` endpoint returns a Server-Sent Events stream. This
+        method yields :class:`ChatStepEvent` for each intermediate tool call
+        and a final :class:`ChatAnswerEvent` with the agent's answer.
+
+        Conversation history is sent automatically and updated from the
+        response so follow-up calls carry full context.
 
         Args:
             question: The question to ask.
 
         Yields:
-            ``AskStepEvent`` or ``AskAnswerEvent`` instances.
+            ``ChatStepEvent`` or ``ChatAnswerEvent`` instances.
         """
+        # Build the full message list: prior history + new user message
+        outgoing = [*self._messages, {"role": "user", "content": question}]
         with self._client.stream(
             "POST",
-            "/v1/ask",
-            json={"question": question},
+            "/v1/chat",
+            json={"messages": outgoing},
             headers={"Accept": "text/event-stream"},
             timeout=httpx.Timeout(10.0, read=300.0),
         ) as stream:
@@ -277,16 +322,27 @@ class SynalinksMemory:
             # Handle final event if stream ends without trailing blank line
             yield from self._process_sse_event(event_type, data_buf)
 
-    @staticmethod
-    def _process_sse_event(event_type: str, data_buf: str):
+    def clear(self) -> None:
+        """Reset the conversation history.
+
+        After calling this, the next :meth:`chat` call starts a fresh
+        conversation with no prior context.
+        """
+        self._messages = []
+
+    def _process_sse_event(self, event_type: str, data_buf: str):
         """Parse a single SSE event and yield the appropriate model."""
         if not data_buf:
             return
         payload = _loads(data_buf)
         if event_type == "step":
-            yield AskStepEvent(**payload)
+            yield ChatStepEvent(**payload)
         elif event_type == "answer":
-            yield AskAnswerEvent(**payload)
+            event = ChatAnswerEvent(**payload)
+            # Update internal conversation history from the server response
+            if event.messages:
+                self._messages = event.messages
+            yield event
         elif event_type == "error":
             raise SynalinksError(
                 500,
