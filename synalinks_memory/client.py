@@ -10,6 +10,15 @@ import threading
 from typing import Any
 
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+    wait_fixed,
+    wait_combine,
+    before_sleep_log,
+)
 
 try:
     import orjson as _json
@@ -43,6 +52,27 @@ _ERROR_MAP: dict[int, type[SynalinksError]] = {
 
 DEFAULT_BASE_URL = "https://app.synalinks.com/api"
 
+logger = logging.getLogger(__name__)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient errors that are safe to retry."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, SynalinksError) and exc.status_code >= 500:
+        return True
+    return False
+
+
+def _rate_limit_wait(retry_state) -> float:
+    """If the last exception was a RateLimitError with retry_after, use it."""
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, RateLimitError) and exc.retry_after is not None:
+        return exc.retry_after
+    return 0
+
 
 class SynalinksMemory:
     """Synchronous client for the Synalinks Memory API.
@@ -65,6 +95,7 @@ class SynalinksMemory:
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 30.0,
+        max_retries: int = 3,
     ) -> None:
         resolved_key = api_key or os.environ.get("SYNALINKS_API_KEY")
         if not resolved_key:
@@ -82,6 +113,18 @@ class SynalinksMemory:
         )
         # Conversation history for multi-turn chat
         self._messages: list[dict[str, Any]] = []
+
+        # Build the tenacity retryer once and share across all methods
+        self._retryer = retry(
+            retry=retry_if_exception(_is_retryable),
+            stop=stop_after_attempt(max_retries),
+            wait=wait_combine(
+                wait_fixed(0) + wait_exponential(multiplier=0.5, max=30),
+                _rate_limit_wait,
+            ),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
 
         # Fire a non-blocking request to wake up the backend (handles cold start)
         self._warm_up()
@@ -114,12 +157,23 @@ class SynalinksMemory:
         """Close the underlying HTTP client."""
         self._client.close()
 
+    # -- Retryable request helpers ---------------------------------------------
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send an HTTP request with automatic retries on transient errors."""
+
+        def _do() -> httpx.Response:
+            resp = self._client.request(method, url, **kwargs)
+            self._handle_response(resp)
+            return resp
+
+        return self._retryer(_do)()
+
     # -- Public API ------------------------------------------------------------
 
     def list(self) -> PredicateList:
         """List all available predicates (tables, concepts, rules)."""
-        resp = self._client.get("/v1/predicates")
-        self._handle_response(resp)
+        resp = self._request("GET", "/v1/predicates")
         return PredicateList.model_validate(_loads(resp.content))
 
     def execute(
@@ -154,25 +208,25 @@ class SynalinksMemory:
             body["format"] = format
 
         if format is not None and output:
-            # Stream directly to disk — avoids buffering the entire file
-            with self._client.stream(
-                "POST",
-                f"/v1/predicates/{predicate}/execute",
-                json=body,
-            ) as stream:
-                self._handle_response(stream)
-                written = 0
-                with open(output, "wb") as f:
-                    for chunk in stream.iter_bytes(chunk_size=65_536):
-                        f.write(chunk)
-                        written += len(chunk)
-                return written
+            # Stream directly to disk — avoids buffering the entire file.
+            # Retries are handled by wrapping the whole streaming block.
+            def _stream_to_disk() -> int:
+                with self._client.stream(
+                    "POST",
+                    f"/v1/predicates/{predicate}/execute",
+                    json=body,
+                ) as stream:
+                    self._handle_response(stream)
+                    written = 0
+                    with open(output, "wb") as f:
+                        for chunk in stream.iter_bytes(chunk_size=65_536):
+                            f.write(chunk)
+                            written += len(chunk)
+                    return written
 
-        resp = self._client.post(
-            f"/v1/predicates/{predicate}/execute",
-            json=body,
-        )
-        self._handle_response(resp)
+            return self._retryer(_stream_to_disk)()
+
+        resp = self._request("POST", f"/v1/predicates/{predicate}/execute", json=body)
 
         if format is not None:
             return resp.content
@@ -183,11 +237,11 @@ class SynalinksMemory:
         self, predicate: str, keywords: str, *, limit: int = 100, offset: int = 0
     ) -> SearchResult:
         """Search a predicate by keywords."""
-        resp = self._client.post(
+        resp = self._request(
+            "POST",
             f"/v1/predicates/{predicate}/search",
             json={"keywords": keywords, "limit": limit, "offset": offset},
         )
-        self._handle_response(resp)
         return SearchResult.model_validate(_loads(resp.content))
 
     def upload(
@@ -211,19 +265,23 @@ class SynalinksMemory:
         """
         import os as _os
 
-        with open(file_path, "rb") as f:
-            files = {"file": (_os.path.basename(file_path), f)}
-            data: dict[str, str] = {}
-            if name is not None:
-                data["name"] = name
-            if description is not None:
-                data["description"] = description
-            if overwrite:
-                data["overwrite"] = "true"
+        def _do_upload() -> httpx.Response:
+            with open(file_path, "rb") as f:
+                files = {"file": (_os.path.basename(file_path), f)}
+                data: dict[str, str] = {}
+                if name is not None:
+                    data["name"] = name
+                if description is not None:
+                    data["description"] = description
+                if overwrite:
+                    data["overwrite"] = "true"
 
-            resp = self._client.post("/v1/tables/upload", files=files, data=data)
+                resp = self._client.post("/v1/tables/upload", files=files, data=data)
 
-        self._handle_response(resp)
+            self._handle_response(resp)
+            return resp
+
+        resp = self._retryer(_do_upload)()
         return UploadResult.model_validate(_loads(resp.content))
 
     def insert(self, predicate: str, row: dict[str, Any]) -> InsertResult:
@@ -236,11 +294,11 @@ class SynalinksMemory:
         Returns:
             InsertResult with the predicate name and inserted row.
         """
-        resp = self._client.post(
+        resp = self._request(
+            "POST",
             f"/v1/predicates/{predicate}/rows",
             json={"row": row},
         )
-        self._handle_response(resp)
         return InsertResult.model_validate(_loads(resp.content))
 
     def update(
@@ -256,11 +314,11 @@ class SynalinksMemory:
         Returns:
             UpdateResult with predicate name, updated count, and values.
         """
-        resp = self._client.put(
+        resp = self._request(
+            "PUT",
             f"/v1/predicates/{predicate}/rows",
             json={"filter": filter, "values": values},
         )
-        self._handle_response(resp)
         return UpdateResult.model_validate(_loads(resp.content))
 
     def chat(self, question: str) -> str:
@@ -300,27 +358,36 @@ class SynalinksMemory:
         """
         # Build the full message list: prior history + new user message
         outgoing = [*self._messages, {"role": "user", "content": question}]
-        with self._client.stream(
-            "POST",
-            "/v1/chat",
-            json={"messages": outgoing},
-            headers={"Accept": "text/event-stream"},
-            timeout=httpx.Timeout(10.0, read=300.0),
-        ) as stream:
-            self._handle_response(stream)
-            event_type = ""
-            data_buf = ""
-            for line in stream.iter_lines():
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    data_buf = line[len("data:"):].strip()
-                elif line == "":
-                    yield from self._process_sse_event(event_type, data_buf)
-                    event_type = ""
-                    data_buf = ""
-            # Handle final event if stream ends without trailing blank line
-            yield from self._process_sse_event(event_type, data_buf)
+
+        # For streaming, collect events via retry then yield them.
+        # We cannot yield inside a tenacity-wrapped function, so we
+        # collect into a list on each attempt and return it.
+        def _do_stream() -> list:
+            events: list = []
+            with self._client.stream(
+                "POST",
+                "/v1/chat",
+                json={"messages": outgoing},
+                headers={"Accept": "text/event-stream"},
+                timeout=httpx.Timeout(10.0, read=300.0),
+            ) as stream:
+                self._handle_response(stream)
+                event_type = ""
+                data_buf = ""
+                for line in stream.iter_lines():
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_buf = line[len("data:"):].strip()
+                    elif line == "":
+                        events.extend(self._process_sse_event(event_type, data_buf))
+                        event_type = ""
+                        data_buf = ""
+                # Handle final event if stream ends without trailing blank line
+                events.extend(self._process_sse_event(event_type, data_buf))
+            return events
+
+        yield from self._retryer(_do_stream)()
 
     def clear(self) -> None:
         """Reset the conversation history.

@@ -1,18 +1,30 @@
 """Unit tests for the Synalinks Memory SDK using httpx MockTransport."""
 
 import json
+import logging
 
 import httpx
 import pytest
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+    wait_fixed,
+    wait_combine,
+    before_sleep_log,
+)
 
 from synalinks_memory import (
     AuthenticationError,
     ForbiddenError,
     NotFoundError,
     RateLimitError,
+    SynalinksError,
     SynalinksMemory,
     ValidationError,
 )
+from synalinks_memory.client import _is_retryable, _rate_limit_wait
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +76,35 @@ def _make_transport(handler):
     return httpx.MockTransport(handler)
 
 
+_logger = logging.getLogger("synalinks_memory")
+
+
+def _make_test_retryer(max_retries: int = 1):
+    """Build a tenacity retryer for tests. max_retries=1 means no retry."""
+    return retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(max_retries),
+        wait=wait_combine(
+            wait_fixed(0) + wait_exponential(multiplier=0.5, max=30),
+            _rate_limit_wait,
+        ),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
+        reraise=True,
+    )
+
+
+def _make_test_client(transport, base_url="https://api.test", max_retries=1):
+    """Create a SynalinksMemory with a mock transport, bypassing __init__."""
+    client = SynalinksMemory.__new__(SynalinksMemory)
+    client._client = httpx.Client(
+        transport=transport, base_url=base_url,
+        headers={"X-API-Key": "test-key"},
+    )
+    client._messages = []
+    client._retryer = _make_test_retryer(max_retries)
+    return client
+
+
 def _error_response(status_code: int, code: str, message: str, headers=None):
     body = {"error": {"code": code, "message": message}}
     return httpx.Response(
@@ -85,13 +126,7 @@ class TestListPredicates:
             assert request.headers["X-API-Key"] == "test-key"
             return httpx.Response(200, json=PREDICATES_RESPONSE)
 
-        transport = _make_transport(handler)
-        client = SynalinksMemory.__new__(SynalinksMemory)
-        client._client = httpx.Client(
-            transport=transport, base_url="https://api.test",
-            headers={"X-API-Key": "test-key"},
-        )
-
+        client = _make_test_client(_make_transport(handler))
         result = client.list()
 
         assert len(result.tables) == 2
@@ -111,10 +146,7 @@ class TestExecute:
             assert body["offset"] == 5
             return httpx.Response(200, json=EXECUTE_RESPONSE)
 
-        transport = _make_transport(handler)
-        client = SynalinksMemory.__new__(SynalinksMemory)
-        client._client = httpx.Client(transport=transport, base_url="https://api.test")
-
+        client = _make_test_client(_make_transport(handler))
         result = client.execute("Users", limit=10, offset=5)
 
         assert result.predicate == "Users"
@@ -134,10 +166,7 @@ class TestSearch:
             assert body["keywords"] == "alice"
             return httpx.Response(200, json=SEARCH_RESPONSE)
 
-        transport = _make_transport(handler)
-        client = SynalinksMemory.__new__(SynalinksMemory)
-        client._client = httpx.Client(transport=transport, base_url="https://api.test")
-
+        client = _make_test_client(_make_transport(handler))
         result = client.search("Users", "alice")
 
         assert result.predicate == "Users"
@@ -156,10 +185,9 @@ class TestErrorMapping:
         def handler(request: httpx.Request):
             return _error_response(status_code, code, message, headers)
 
-        transport = _make_transport(handler)
-        client = SynalinksMemory.__new__(SynalinksMemory)
-        client._client = httpx.Client(transport=transport, base_url="https://api.test")
-        return client
+        # max_retries=1 for non-retryable errors (4xx), but 429/5xx are retryable
+        # so we still use 1 to avoid slow tests
+        return _make_test_client(_make_transport(handler), max_retries=1)
 
     def test_401_raises_authentication_error(self):
         client = self._make_client(401, "unauthorized", "Invalid API key")
@@ -216,3 +244,110 @@ class TestContextManager:
             )
             result = client.list()
             assert len(result.tables) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests — retry behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestRetry:
+    def test_retries_on_500_then_succeeds(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _error_response(500, "internal", "Server error")
+            return httpx.Response(200, json=PREDICATES_RESPONSE)
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        result = client.list()
+        assert len(result.tables) == 2
+        assert call_count == 2
+
+    def test_retries_on_transport_error_then_succeeds(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("Connection refused")
+            return httpx.Response(200, json=PREDICATES_RESPONSE)
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        result = client.list()
+        assert len(result.tables) == 2
+        assert call_count == 2
+
+    def test_retries_on_dns_error_then_succeeds(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError(
+                    "[Errno -2] Name or service not known"
+                )
+            return httpx.Response(200, json=PREDICATES_RESPONSE)
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        result = client.list()
+        assert len(result.tables) == 2
+        assert call_count == 2
+
+    def test_no_retry_on_400(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            return _error_response(400, "bad_request", "Bad request")
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        with pytest.raises(ValidationError):
+            client.list()
+        assert call_count == 1
+
+    def test_no_retry_on_401(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            return _error_response(401, "unauthorized", "Invalid key")
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        with pytest.raises(AuthenticationError):
+            client.list()
+        assert call_count == 1
+
+    def test_exhausts_retries_on_persistent_500(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            return _error_response(500, "internal", "Server error")
+
+        client = _make_test_client(_make_transport(handler), max_retries=3)
+        with pytest.raises(SynalinksError) as exc_info:
+            client.list()
+        assert exc_info.value.status_code == 500
+        assert call_count == 3
+
+    def test_max_retries_1_disables_retry(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            return _error_response(500, "internal", "Server error")
+
+        client = _make_test_client(_make_transport(handler), max_retries=1)
+        with pytest.raises(SynalinksError):
+            client.list()
+        assert call_count == 1
