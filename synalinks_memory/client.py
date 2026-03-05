@@ -56,7 +56,14 @@ logger = logging.getLogger(__name__)
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Return True for transient errors that are safe to retry."""
+    """Return True for transient errors that are safe to retry.
+
+    Timeouts are excluded — they typically mean the server genuinely
+    couldn't respond in time (e.g. a long-running chat), so retrying
+    would just waste time.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return False
     if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, RateLimitError):
@@ -94,7 +101,7 @@ class SynalinksMemory:
         self,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
         max_retries: int = 3,
     ) -> None:
         resolved_key = api_key or os.environ.get("SYNALINKS_API_KEY")
@@ -369,7 +376,7 @@ class SynalinksMemory:
                 "/v1/chat",
                 json={"messages": outgoing},
                 headers={"Accept": "text/event-stream"},
-                timeout=httpx.Timeout(10.0, read=300.0),
+                timeout=httpx.Timeout(120.0, read=600.0),
             ) as stream:
                 self._handle_response(stream)
                 event_type = ""
