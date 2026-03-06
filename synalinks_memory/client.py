@@ -85,14 +85,16 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
-def _rate_limit_wait(retry_state) -> float:
-    """If the last exception was a RateLimitError, use retry_after or a sensible default."""
+def _extra_wait(retry_state) -> float:
+    """Extra wait time based on error type."""
     exc = retry_state.outcome.exception()
     if isinstance(exc, RateLimitError):
         if exc.retry_after is not None:
             return exc.retry_after
-        # No Retry-After header — use a conservative default
-        return 1.0
+        return 5.0
+    # 5xx / gateway timeouts — server needs time to recover
+    if isinstance(exc, SynalinksError) and exc.status_code >= 500:
+        return 5.0
     return 0
 
 
@@ -117,7 +119,7 @@ class SynalinksMemory:
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 120.0,
-        max_retries: int = 3,
+        max_retries: int = 5,
         warm_up_max_retries: int = 30,
         warm_up_interval: float = 2.0,
     ) -> None:
@@ -144,7 +146,7 @@ class SynalinksMemory:
             stop=stop_after_attempt(max_retries),
             wait=wait_combine(
                 wait_fixed(0) + wait_exponential(multiplier=0.5, max=30),
-                _rate_limit_wait,
+                _extra_wait,
             ),
             before_sleep=_before_sleep,
             reraise=True,
