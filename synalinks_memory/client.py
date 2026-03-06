@@ -17,7 +17,6 @@ from tenacity import (
     wait_exponential,
     wait_fixed,
     wait_combine,
-    before_sleep_log,
 )
 
 try:
@@ -55,6 +54,20 @@ DEFAULT_BASE_URL = "https://app.synalinks.com/api"
 logger = logging.getLogger(__name__)
 
 
+def _before_sleep(retry_state) -> None:
+    """Log retries, but silently handle rate limits."""
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, RateLimitError):
+        return
+    logger.warning(
+        "Retrying %s in %.1fs (attempt %d) due to %s",
+        retry_state.fn.__qualname__ if retry_state.fn else "call",
+        retry_state.next_action.sleep,
+        retry_state.attempt_number,
+        exc,
+    )
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Return True for transient errors that are safe to retry.
 
@@ -74,10 +87,13 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 def _rate_limit_wait(retry_state) -> float:
-    """If the last exception was a RateLimitError with retry_after, use it."""
+    """If the last exception was a RateLimitError, use retry_after or a sensible default."""
     exc = retry_state.outcome.exception()
-    if isinstance(exc, RateLimitError) and exc.retry_after is not None:
-        return exc.retry_after
+    if isinstance(exc, RateLimitError):
+        if exc.retry_after is not None:
+            return exc.retry_after
+        # No Retry-After header — use a conservative default
+        return 1.0
     return 0
 
 
@@ -129,7 +145,7 @@ class SynalinksMemory:
                 wait_fixed(0) + wait_exponential(multiplier=0.5, max=30),
                 _rate_limit_wait,
             ),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
+            before_sleep=_before_sleep,
             reraise=True,
         )
 
@@ -439,7 +455,7 @@ class SynalinksMemory:
             body = _loads(resp.content)
             error = body.get("error", {})
             code = error.get("code", code)
-            message = error.get("message", message)
+            message = error.get("message", body.get("detail", message))
         except Exception:
             pass
 
