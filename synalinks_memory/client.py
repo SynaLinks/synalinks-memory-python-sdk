@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from typing import Any
 
 import httpx
@@ -119,6 +118,8 @@ class SynalinksMemory:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 120.0,
         max_retries: int = 3,
+        warm_up_max_retries: int = 30,
+        warm_up_interval: float = 2.0,
     ) -> None:
         resolved_key = api_key or os.environ.get("SYNALINKS_API_KEY")
         if not resolved_key:
@@ -149,24 +150,25 @@ class SynalinksMemory:
             reraise=True,
         )
 
-        # Fire a non-blocking request to wake up the backend (handles cold start)
+        # Wait for backend to be ready (handles cold start)
+        self._warm_up_max_retries = warm_up_max_retries
+        self._warm_up_interval = warm_up_interval
         self._warm_up()
 
     # -- Warm-up ---------------------------------------------------------------
 
     def _warm_up(self) -> None:
-        """Send a background health check to wake up the backend container."""
+        """Poll the health endpoint until the backend is ready (cold start)."""
+        import time as _time
 
-        def _ping() -> None:
+        for attempt in range(self._warm_up_max_retries):
             try:
-                self._client.get("/v1/health")
+                resp = self._client.get("/v1/health")
+                if resp.is_success:
+                    return
             except Exception:
-                logging.getLogger(__name__).debug(
-                    "Warm-up request failed (backend may be starting)"
-                )
-
-        thread = threading.Thread(target=_ping, daemon=True)
-        thread.start()
+                pass
+            _time.sleep(self._warm_up_interval)
 
     # -- Context manager -------------------------------------------------------
 
