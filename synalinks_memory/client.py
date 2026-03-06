@@ -450,9 +450,17 @@ class SynalinksMemory:
         if resp.is_success:
             return
 
+        # For streaming responses the body hasn't been read yet —
+        # read it explicitly so we can parse the error envelope.
+        if not resp.is_stream_consumed:
+            try:
+                resp.read()
+            except Exception:
+                pass
+
         # Try to parse the structured error envelope
         code = "unknown"
-        message = resp.text
+        message = resp.text or f"HTTP {resp.status_code}"
         try:
             body = _loads(resp.content)
             error = body.get("error", {})
