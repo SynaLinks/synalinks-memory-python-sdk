@@ -24,7 +24,7 @@ from synalinks_memory import (
     SynalinksMemory,
     ValidationError,
 )
-from synalinks_memory.client import _is_retryable, _rate_limit_wait
+from synalinks_memory.client import _is_retryable, _extra_wait
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ EXECUTE_RESPONSE = {
 
 SEARCH_RESPONSE = {
     "predicate": "Users",
-    "keywords": "alice",
+    "pattern": "alice",
     "columns": [
         {"name": "id", "json_schema": {"type": "integer"}},
         {"name": "name", "json_schema": {"type": "string"}},
@@ -86,7 +86,7 @@ def _make_test_retryer(max_retries: int = 1):
         stop=stop_after_attempt(max_retries),
         wait=wait_combine(
             wait_fixed(0) + wait_exponential(multiplier=0.5, max=30),
-            _rate_limit_wait,
+            _extra_wait,
         ),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
         reraise=True,
@@ -163,14 +163,14 @@ class TestSearch:
         def handler(request: httpx.Request):
             assert request.url.path == "/v1/predicates/Users/search"
             body = json.loads(request.content)
-            assert body["keywords"] == "alice"
+            assert body["pattern"] == "alice"
             return httpx.Response(200, json=SEARCH_RESPONSE)
 
         client = _make_test_client(_make_transport(handler))
         result = client.search("Users", "alice")
 
         assert result.predicate == "Users"
-        assert result.keywords == "alice"
+        assert result.pattern == "alice"
         assert result.row_count == 1
         assert result.rows[0]["name"] == "Alice"
 

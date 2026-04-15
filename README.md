@@ -46,8 +46,8 @@ with SynalinksMemory() as client:
     for row in result.rows:
         print(row)
 
-    # Search with keywords (fuzzy matching)
-    result = client.search("Users", "alice")
+    # Search with regex pattern (case-insensitive, space=AND, pipe=OR)
+    result = client.search("Users", "alice|bob")
     for row in result.rows:
         print(row)
 
@@ -121,7 +121,7 @@ with SynalinksMemory() as client:
 |--------|-------------|
 | `list()` | List all tables, concepts, and rules |
 | `execute(predicate, *, limit=100, offset=0, format=None, output=None)` | Fetch rows (or export as json/csv/parquet file when *format* is set) |
-| `search(predicate, keywords, *, limit=100, offset=0)` | Search rows by keywords (fuzzy matching) |
+| `search(predicate, pattern, *, limit=100, offset=0)` | Search rows by regex pattern (case-insensitive, space=AND, pipe=OR) |
 | `upload(file_path, *, name=None, description=None, overwrite=False)` | Upload a CSV or Parquet file as a new table |
 | `insert(predicate, row)` | Insert a single row into a table |
 | `update(predicate, filter, values)` | Update rows matching a filter with new values |

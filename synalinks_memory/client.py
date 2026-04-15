@@ -261,13 +261,23 @@ class SynalinksMemory:
         return ExecuteResult.model_validate(_loads(resp.content))
 
     def search(
-        self, predicate: str, keywords: str, *, limit: int = 100, offset: int = 0
+        self, predicate: str, pattern: str, *, limit: int = 100, offset: int = 0
     ) -> SearchResult:
-        """Search a predicate by keywords."""
+        """Search a predicate by regex pattern.
+
+        Args:
+            predicate: The predicate name to search.
+            pattern: Regex pattern (case-insensitive). Space=AND, pipe=OR.
+            limit: Max rows to return (1–1000).
+            offset: Row offset for pagination.
+
+        Returns:
+            SearchResult with matching rows.
+        """
         resp = self._request(
             "POST",
             f"/v1/predicates/{predicate}/search",
-            json={"keywords": keywords, "limit": limit, "offset": offset},
+            json={"pattern": pattern, "limit": limit, "offset": offset},
         )
         return SearchResult.model_validate(_loads(resp.content))
 

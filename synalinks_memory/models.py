@@ -57,7 +57,7 @@ class SearchResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     predicate: str
-    keywords: str
+    pattern: str
     columns: list[Column]
     rows: Any  # list[dict[str, Any]] — skip per-row validation
     row_count: int
